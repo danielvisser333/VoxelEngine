@@ -22,6 +22,7 @@ pub struct Implementation{
     pub vertex_buffer : VertexBuffer,
     pub command_pool : VKCommandPool,
     pub synchroniser : VKSynchroniser,
+    pub descriptor : VKDescriptorPool,
 }
 impl Implementation{
     pub fn new(validation : bool , window : &Window) -> Self{
@@ -38,8 +39,10 @@ impl Implementation{
         let render_pass = VKRenderPass::new(&device.device, swapchain.format.format);
         println!("Creating Vulkan Framebuffers.");
         let framebuffers = VKFramebuffers::new(&swapchain.swapchain_image_views, &device.device, &swapchain.extent, &render_pass.render_pass);
+        println!("Creating Vulkan Descriptor Set.");
+        let descriptor = VKDescriptorPool::new(&device.device , &instance.instance , &device.physical_device , swapchain.swapchain_images.len() as u32);
         println!("Creating Vulkan Pipeline.");
-        let pipeline = VKPipeline::new(&device.device, &render_pass.render_pass);
+        let pipeline = VKPipeline::new(&device.device, &render_pass.render_pass, &descriptor.set_layout);
         println!("Creating Vulkan Command Pool.");
         let command_pool = VKCommandPool::new(&device.device,device.graphics_queue,framebuffers.framebuffers.len() as u32);
         println!("Creating Vulkan Vertex Buffer.");
@@ -52,7 +55,7 @@ impl Implementation{
         let indices = vec!(0,1,2,2,3,0);
         //let t_command_pool = VKCommandPool::new(&device.device, device.transfer_queue, 0);
         let vertex_buffer = VertexBuffer::new(&instance.instance, &device.device, &device.physical_device, command_pool.command_pool , device.graphics_queue_vk, vertices, indices);
-        command_pool.record_command_buffers(&pipeline.pipeline, &device.device, &render_pass.render_pass, &framebuffers.framebuffers, &swapchain.extent, vertex_buffer.buffer , vertex_buffer.index_buffer , vertex_buffer.indices_count);
+        command_pool.record_command_buffers(&pipeline.pipeline, &device.device, &render_pass.render_pass, &framebuffers.framebuffers, &swapchain.extent, vertex_buffer.buffer , vertex_buffer.index_buffer , vertex_buffer.indices_count , &descriptor.descriptor_sets , &pipeline.pipeline_layout);
         println!("Creating Vulkan Synchroniser.");
         let synchroniser = VKSynchroniser::new(2, &device.device);
         return Implementation{
@@ -66,9 +69,10 @@ impl Implementation{
             vertex_buffer : vertex_buffer,
             command_pool : command_pool,
             synchroniser : synchroniser,
+            descriptor : descriptor,
         };
     }
-    pub fn draw_frame(&mut self){
+    pub fn draw_frame(&mut self , model_matrix : &cgmath::Matrix4<f32> , view_matrix : &cgmath::Matrix4<f32> , proj_matrix : &cgmath::Matrix4<f32>){
         let wait_fences = [self.synchroniser.in_flight_fences[self.synchroniser.current_frame as usize]];
         unsafe{self.device.device.wait_for_fences(&wait_fences,true,std::u64::MAX)}.expect("Failed to wait for fence.");
         let image_index = unsafe{
@@ -87,7 +91,7 @@ impl Implementation{
         let wait_semaphores = [self.synchroniser.image_available_semaphores[self.synchroniser.current_frame as usize]];
         let wait_stages = [PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
         let signal_semaphores = [self.synchroniser.render_finished_semaphores[self.synchroniser.current_frame as usize]];
-        
+        self.descriptor.update_uniform_buffer(image_index,model_matrix,view_matrix,proj_matrix,&self.device.device);
         let submit_infos = [SubmitInfo {
             s_type: StructureType::SUBMIT_INFO,
             p_next: std::ptr::null(),
@@ -134,7 +138,7 @@ impl Implementation{
             for &command_buffer in self.command_pool.command_buffers.iter(){
                 unsafe{self.device.device.reset_command_buffer(command_buffer, CommandBufferResetFlags::empty())}.expect("Failed to flush command buffer.");
             }
-            self.command_pool.record_command_buffers(&self.pipeline.pipeline, &self.device.device, &self.render_pass.render_pass, &self.framebuffers.framebuffers, &self.swapchain.extent, self.vertex_buffer.buffer, self.vertex_buffer.index_buffer, self.vertex_buffer.indices_count);
+            self.command_pool.record_command_buffers(&self.pipeline.pipeline, &self.device.device, &self.render_pass.render_pass, &self.framebuffers.framebuffers, &self.swapchain.extent, self.vertex_buffer.buffer, self.vertex_buffer.index_buffer, self.vertex_buffer.indices_count,&self.descriptor.descriptor_sets,&self.pipeline.pipeline_layout);
         }
     }
     fn recreate_swapchain(&mut self){
@@ -151,7 +155,7 @@ impl Implementation{
             command_buffer_count : self.framebuffers.framebuffers.len() as u32,
         };
         self.command_pool.command_buffers = unsafe{self.device.device.allocate_command_buffers(&command_buffers_create_info)}.expect("Failed to reallocate command buffers.");
-        self.command_pool.record_command_buffers(&self.pipeline.pipeline, &self.device.device, &self.render_pass.render_pass, &self.framebuffers.framebuffers, &self.swapchain.extent, self.vertex_buffer.buffer , self.vertex_buffer.index_buffer, self.vertex_buffer.indices_count);
+        self.command_pool.record_command_buffers(&self.pipeline.pipeline, &self.device.device, &self.render_pass.render_pass, &self.framebuffers.framebuffers, &self.swapchain.extent, self.vertex_buffer.buffer , self.vertex_buffer.index_buffer, self.vertex_buffer.indices_count, &self.descriptor.descriptor_sets,&self.pipeline.pipeline_layout);
     }
     fn cleanup_swapchain(&mut self){
         unsafe{self.device.device.free_command_buffers(self.command_pool.command_pool, &self.command_pool.command_buffers)};
@@ -169,6 +173,14 @@ impl Drop for Implementation{
     fn drop(&mut self){
         unsafe{self.device.device.device_wait_idle()}.expect("Failed to recreate swapchain.");
         self.cleanup_swapchain();
+        unsafe{self.device.device.destroy_descriptor_pool(self.descriptor.descriptor_pool, None)};
+        for &buffer in self.descriptor.buffers.iter(){
+            unsafe{self.device.device.destroy_buffer(buffer, None)};
+        }
+        for &memory in self.descriptor.buffers_memory.iter(){
+            unsafe{self.device.device.free_memory(memory, None)};
+        }
+        unsafe{self.device.device.destroy_descriptor_set_layout(self.descriptor.set_layout, None)};
         unsafe{self.device.device.destroy_pipeline(self.pipeline.pipeline, None)};
         unsafe{self.device.device.destroy_pipeline_layout(self.pipeline.pipeline_layout, None)};
         unsafe{self.device.device.destroy_command_pool(self.command_pool.command_pool, None)};
@@ -512,13 +524,14 @@ pub struct VKPipeline{
     pub pipeline : Pipeline,
 }
 impl VKPipeline{
-    pub fn new(device : &Device , render_pass : &RenderPass) -> Self{
+    pub fn new(device : &Device , render_pass : &RenderPass , set_layout : &DescriptorSetLayout) -> Self{
+        let set_layouts = [*set_layout];
         let pipeline_layout_create_info = PipelineLayoutCreateInfo{
             s_type : StructureType::PIPELINE_LAYOUT_CREATE_INFO,
             p_next : std::ptr::null(),
             flags : PipelineLayoutCreateFlags::empty(),
-            set_layout_count : 0,
-            p_set_layouts : std::ptr::null(),
+            set_layout_count : set_layouts.len() as u32,
+            p_set_layouts : set_layouts.as_ptr(),
             push_constant_range_count : 0,
             p_push_constant_ranges : std::ptr::null(),
         };
@@ -720,9 +733,9 @@ impl VKCommandPool{
             unsafe{device.end_command_buffer(command_buffer)}.expect("Failed to record command buffers.");
         }
     }
-    pub fn record_command_buffers(&self,pipeline : &Pipeline,device : &Device,render_pass : &RenderPass , framebuffers : &Vec<Framebuffer> , extent : &Extent2D , vertex_buffer : Buffer , index_buffer : Buffer , index_count : u32){
+    pub fn record_command_buffers(&self,pipeline : &Pipeline,device : &Device,render_pass : &RenderPass , framebuffers : &Vec<Framebuffer> , extent : &Extent2D , vertex_buffer : Buffer , index_buffer : Buffer , index_count : u32 , descriptor_sets : &Vec<DescriptorSet> , pipeline_layout : &PipelineLayout){
         self.begin_command_buffers(device,render_pass,framebuffers,extent);
-        for &command_buffer in self.command_buffers.iter(){
+        for (i,&command_buffer) in self.command_buffers.iter().enumerate(){
             unsafe{device.cmd_bind_pipeline(command_buffer, PipelineBindPoint::GRAPHICS, *pipeline)};
             let vertex_buffers = [vertex_buffer];
             let offsets = [0 as DeviceSize];
@@ -732,6 +745,7 @@ impl VKCommandPool{
             let scissor = [Rect2D{extent:*extent,offset:Offset2D{x:0,y:0}}];
             unsafe{device.cmd_set_viewport(command_buffer, 0, &viewport)};
             unsafe{device.cmd_set_scissor(command_buffer, 0, &scissor)};
+            unsafe{device.cmd_bind_descriptor_sets(command_buffer, PipelineBindPoint::GRAPHICS, *pipeline_layout, 0, &[descriptor_sets[i]], &[])}
             unsafe{device.cmd_draw_indexed(command_buffer,index_count,1,0,0,0)}
         }
         self.end_command_buffers(device);
@@ -886,6 +900,100 @@ impl VertexBuffer{
         self.indices_count = indices.len() as u32;
     }
 }
+pub struct VKDescriptorPool{
+    pub set_layout : DescriptorSetLayout,
+    pub buffers : Vec<Buffer>,
+    pub buffers_memory : Vec<DeviceMemory>,
+    pub descriptor_pool : DescriptorPool,
+    pub descriptor_sets : Vec<DescriptorSet>
+}
+impl VKDescriptorPool{
+    pub fn new(device : &Device , instance : &Instance , physical_device : &PhysicalDevice, buffer_count : u32) -> Self{
+        let ubo_layout_binding = DescriptorSetLayoutBinding{
+            binding : 0,
+            descriptor_type : DescriptorType::UNIFORM_BUFFER,
+            descriptor_count : 1,
+            stage_flags : ShaderStageFlags::VERTEX,
+            p_immutable_samplers : std::ptr::null(),
+        };
+        let layout_bindings = [ubo_layout_binding];
+        let descriptor_set_layout_create_info = DescriptorSetLayoutCreateInfo{
+            s_type : StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            p_next : std::ptr::null(),
+            flags : DescriptorSetLayoutCreateFlags::empty(),
+            binding_count : layout_bindings.len() as u32,
+            p_bindings : layout_bindings.as_ptr(),
+        };
+        let set_layout = unsafe{device.create_descriptor_set_layout(&descriptor_set_layout_create_info, None)}.expect("Failed to create desciptor set layout.");
+        let buffer_size = std::mem::size_of::<UniformBufferObject>();
+        let mut buffers = vec!();
+        let mut buffers_memory = vec!();
+        let memory_properties = unsafe{instance.get_physical_device_memory_properties(*physical_device)};
+        for _ in 0..buffer_count{
+            let (buffer,memory) = VertexBuffer::create_buffer(device, buffer_size as u64, BufferUsageFlags::UNIFORM_BUFFER, MemoryPropertyFlags::HOST_VISIBLE | MemoryPropertyFlags::HOST_COHERENT, &memory_properties);
+            buffers.push(buffer);
+            buffers_memory.push(memory);
+        }
+        let pool_sizes = [DescriptorPoolSize{
+            ty : DescriptorType::UNIFORM_BUFFER,
+            descriptor_count : buffer_count,
+        }];
+        let pool_info = DescriptorPoolCreateInfo{
+            s_type : StructureType::DESCRIPTOR_POOL_CREATE_INFO,
+            p_next : std::ptr::null(),
+            flags : DescriptorPoolCreateFlags::empty(),
+            p_pool_sizes : pool_sizes.as_ptr(),
+            max_sets : buffer_count,
+            pool_size_count : 1,
+        };
+        let descriptor_pool = unsafe{device.create_descriptor_pool(&pool_info, None)}.expect("Failed to create descriptor pool.");
+        let mut layouts : Vec<DescriptorSetLayout> = vec!();
+        for _ in 0..buffer_size {
+            layouts.push(set_layout);
+        }
+        let descriptor_set_allocate_info = DescriptorSetAllocateInfo {
+            s_type: StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
+            p_next: std::ptr::null(),
+            descriptor_pool,
+            descriptor_set_count: buffer_count,
+            p_set_layouts: layouts.as_ptr(),
+        };
+        let descriptor_sets = unsafe{device.allocate_descriptor_sets(&descriptor_set_allocate_info)}.expect("Failed to create descriptor sets.");
+        for (i, &descriptor_set) in descriptor_sets.iter().enumerate(){
+            let descriptor_buffer_info = [DescriptorBufferInfo {
+                buffer: buffers[i],
+                offset: 0,
+                range: std::mem::size_of::<UniformBufferObject>() as u64,
+            }];
+
+            let descriptor_write_sets = [WriteDescriptorSet {
+                s_type: StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: std::ptr::null(),
+                dst_set: descriptor_set,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: DescriptorType::UNIFORM_BUFFER,
+                p_image_info: std::ptr::null(),
+                p_buffer_info: descriptor_buffer_info.as_ptr(),
+                p_texel_buffer_view: std::ptr::null(),
+            }];
+            unsafe{device.update_descriptor_sets(&descriptor_write_sets, &[])};
+        }
+        return VKDescriptorPool{set_layout,buffers,buffers_memory,descriptor_pool,descriptor_sets};
+    }
+    pub fn update_uniform_buffer(&self , current_index : u32 ,  model_matrix : &cgmath::Matrix4<f32> , view_matrix : &cgmath::Matrix4<f32> , proj_matrix : &cgmath::Matrix4<f32> , device : &Device){
+        let ubos = [UniformBufferObject{
+            model: *model_matrix,
+            view: *view_matrix,
+            proj: *proj_matrix,
+        }];
+        let buffer_size = (std::mem::size_of::<UniformBufferObject>() * ubos.len()) as u64;
+        let buffer_data = unsafe{device.map_memory(self.buffers_memory[current_index as usize], 0, buffer_size, MemoryMapFlags::empty())}.expect("Failed to rotate camera.") as *mut UniformBufferObject;
+        unsafe{buffer_data.copy_from_nonoverlapping(ubos.as_ptr(),ubos.len())};
+        unsafe{device.unmap_memory(self.buffers_memory[current_index as usize])};
+    }
+}
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct Vertex {
@@ -917,6 +1025,13 @@ impl Vertex {
             },
         ]
     }
+}
+#[repr(C)]
+#[derive(Clone, Debug, Copy)]
+pub struct UniformBufferObject{
+    model : cgmath::Matrix4<f32>,
+    view : cgmath::Matrix4<f32>,
+    proj : cgmath::Matrix4<f32>,
 }
 fn find_memory_type(type_filter: u32,required_properties: MemoryPropertyFlags,mem_properties: PhysicalDeviceMemoryProperties,) -> u32 {
     for (i, memory_type) in mem_properties.memory_types.iter().enumerate() {

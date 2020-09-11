@@ -31,7 +31,20 @@ fn main(){
                 window.request_redraw();
             }
             winit::event::Event::RedrawRequested(_) => {
-                renderer.draw_frame();
+                let model_matrix = cgmath::Matrix4::from_axis_angle(cgmath::Vector3::new(0.0, 0.0, 1.0), cgmath::Rad(0.5) * start_time.elapsed().as_secs_f32());
+                let view_matrix = cgmath::Matrix4::look_at(
+                    cgmath::Point3::new(2.0, 2.0, 2.0),
+                    cgmath::Point3::new(0.0, 0.0, 0.0),
+                    cgmath::Vector3::new(0.0, 0.0, 1.0),
+                );
+                let proj_matrix = cgmath::perspective(
+                    cgmath::Rad(0.5),
+                    renderer.swapchain.extent.width as f32
+                        / renderer.swapchain.extent.height as f32,
+                    0.1,
+                    10.0,
+                );
+                renderer.draw_frame(&model_matrix,&view_matrix,&proj_matrix);
             }
             _=>{}
         }

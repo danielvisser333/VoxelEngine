@@ -10,6 +10,7 @@ edition = "2018"
 ash = "*"
 winit = "*"
 memoffset = "*"
+cgmath = "*"
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = "*", features = ["windef", "winuser"]}
