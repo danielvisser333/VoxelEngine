@@ -11,6 +11,7 @@ ash = "*"
 winit = "*"
 memoffset = "*"
 cgmath = "*"
+rand = "*"
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = "*", features = ["windef", "winuser"]}
