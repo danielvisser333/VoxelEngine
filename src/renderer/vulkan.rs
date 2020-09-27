@@ -132,9 +132,8 @@ impl Implementation{
         self.synchroniser.current_frame = (self.synchroniser.current_frame+1) % self.synchroniser.max_frames_in_flight;
     }
     pub fn flush_and_refill_vertex_buffer(&mut self , vertices : Vec<Vertex> , indices : Vec<u32>){
-        println!("Flushed and refilled vertex buffer, this may indicate a game transition.");
         let indices_count = indices.len() as u32;
-        self.vertex_buffer.update_buffer(&self.device, &self.instance, vertices, indices, &self.command_pool, &self.device.graphics_queue_vk, &self.pipeline.pipeline , &self.pipeline.pipeline_layout , &self.render_pass.render_pass , &self.framebuffers.framebuffers , &self.swapchain.extent , &self.descriptor.descriptor_sets);
+        self.vertex_buffer.update_buffer(&self.device, &self.instance, vertices, indices, &mut self.command_pool, &self.device.graphics_queue_vk, &self.pipeline.pipeline , &self.pipeline.pipeline_layout , &self.render_pass.render_pass , &self.framebuffers.framebuffers , &self.swapchain.extent , &self.descriptor.descriptor_sets);
         //unsafe{self.device.device.free_command_buffers(self.command_pool.command_pool, &self.command_pool.command_buffers)};
         if indices_count != self.vertex_buffer.indices_count{
             for &command_buffer in self.command_pool.command_buffers.iter(){
@@ -211,7 +210,7 @@ pub struct VKInstance{
 impl VKInstance{
     fn new(validation_enabled : bool) -> Self{
         let entry = Entry::new().expect("Failed to load vulkan.");
-        let validation_layer_name = [CString::new("VK_LAYER_KHRONOS_validation").expect("Failed to create CString.")];
+        let validation_layer_name = if validation_enabled{vec!(CString::new("VK_LAYER_KHRONOS_validation").unwrap())} else {vec!()};
         let validation_layer_name_raw : Vec<*const i8> = validation_layer_name.iter().map(|name| name.as_ptr()).collect();
         let mut extensions : Vec<*const i8> = vec![
             ash::extensions::khr::Surface::name().as_ptr(),
@@ -239,7 +238,7 @@ impl VKInstance{
             enabled_layer_count : validation_layer_name.len() as u32,
             enabled_extension_count : extensions.len() as u32,
             pp_enabled_extension_names : extensions.as_ptr(),
-            pp_enabled_layer_names : validation_layer_name_raw.as_ptr(),
+            pp_enabled_layer_names :validation_layer_name_raw.as_ptr(),
             p_application_info : &application_info
         };
         let instance = unsafe{entry.create_instance(&create_info,None)}.expect("Failed to create vulkan instance.");
@@ -752,6 +751,18 @@ impl VKCommandPool{
         }
         self.end_command_buffers(device);
     }
+    pub fn reallocate_command_buffers(&mut self,count:u32,device:&Device){
+        self.command_buffers = if count != 0{
+            let command_buffers_create_info = CommandBufferAllocateInfo{
+                s_type : StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+                p_next : std::ptr::null(),
+                level : CommandBufferLevel::PRIMARY,
+                command_pool : self.command_pool,
+                command_buffer_count : count,
+            };
+            unsafe{device.allocate_command_buffers(&command_buffers_create_info)}.expect("Failed to allocate command buffers.")
+        } else { Vec::new()};
+    }
 }
 pub struct VKSynchroniser{
     pub image_available_semaphores : Vec<Semaphore>,
@@ -881,43 +892,45 @@ impl VertexBuffer{
         unsafe{device.bind_buffer_memory(buffer, buffer_memory, 0).expect("Failed to bind Buffer");}
         (buffer, buffer_memory)
     }
-    fn update_buffer(&mut self , device : &VKDevice , instance : &VKInstance , vertices : Vec<Vertex> , indices : Vec<u32> , command_pool : &VKCommandPool , queue : &Queue , pipeline : &Pipeline , pipeline_layout : &PipelineLayout , render_pass : &RenderPass , framebuffers : &Vec<Framebuffer> , extent : &Extent2D , descriptor_sets : &Vec<DescriptorSet>){
-        let buffer_size = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
+    fn update_buffer(&mut self , device : &VKDevice , instance : &VKInstance , vertices : Vec<Vertex> , indices : Vec<u32> , command_pool : &mut VKCommandPool , queue : &Queue , pipeline : &Pipeline , pipeline_layout : &PipelineLayout , render_pass : &RenderPass , framebuffers : &Vec<Framebuffer> , extent : &Extent2D , descriptor_sets : &Vec<DescriptorSet>){
+        let buffer_size_vertices = (std::mem::size_of::<Vertex>() * vertices.len()) as u64;
+        let buffer_size_indices = (std::mem::size_of_val(&indices[0]) * indices.len()) as u64;
         let device_memory_properties =unsafe{ instance.instance.get_physical_device_memory_properties(device.physical_device) };
-        let (staging_buffer , staging_buffer_memory) = VertexBuffer::create_buffer(&device.device, buffer_size, BufferUsageFlags::TRANSFER_SRC, MemoryPropertyFlags::HOST_COHERENT | MemoryPropertyFlags::HOST_VISIBLE, &device_memory_properties);
-        let buffer_data = unsafe{device.device.map_memory(staging_buffer_memory,0,buffer_size,MemoryMapFlags::empty()).expect("Failed to Map Memory") as *mut Vertex};
-        unsafe{buffer_data.copy_from_nonoverlapping(vertices.as_ptr(), vertices.len())};
-        unsafe{device.device.unmap_memory(staging_buffer_memory)};
-        VertexBuffer::copy_buffer(&device.device,*queue,command_pool.command_pool,staging_buffer,self.buffer,buffer_size);
-        unsafe{device.device.destroy_buffer(staging_buffer, None)};
-        unsafe{device.device.free_memory(staging_buffer_memory, None)};
-        let buffer_size = (std::mem::size_of_val(&indices[0]) * indices.len()) as u64;
-        let (staging_buffer , staging_buffer_memory) = VertexBuffer::create_buffer(&device.device, buffer_size, BufferUsageFlags::TRANSFER_SRC, MemoryPropertyFlags::HOST_COHERENT | MemoryPropertyFlags::HOST_VISIBLE, &device_memory_properties);
-        let buffer_data = unsafe{device.device.map_memory(staging_buffer_memory,0,buffer_size,MemoryMapFlags::empty()).expect("Failed to Map Memory") as *mut u32};
-        unsafe{buffer_data.copy_from_nonoverlapping(indices.as_ptr(), indices.len())};
-        unsafe{device.device.unmap_memory(staging_buffer_memory)};
-        if vertices.len() as u32 != self.vertex_count{
-            unsafe{device.device.free_memory(self.memory, None)};
-            unsafe{device.device.destroy_buffer(self.buffer, None)};
-            let new_buffer = VertexBuffer::create_buffer(&device.device, buffer_size, BufferUsageFlags::VERTEX_BUFFER | BufferUsageFlags::TRANSFER_DST, MemoryPropertyFlags::DEVICE_LOCAL, &device_memory_properties);
-            self.buffer = new_buffer.0;
-            self.memory = new_buffer.1;
-            if indices.len() as u32 == self.indices_count{
-                command_pool.record_command_buffers(pipeline, &device.device, render_pass, framebuffers, extent, self.buffer, self.index_buffer, indices.len() as u32, descriptor_sets, pipeline_layout);
+        if self.indices_count!=indices.len() as u32 || self.vertex_count != vertices.len() as u32 {
+            unsafe{device.device.device_wait_idle()}.expect("Failed to update vertex buffer.");
+            unsafe{device.device.free_command_buffers(command_pool.command_pool, &command_pool.command_buffers)}
+            if self.vertex_count != vertices.len() as u32{
+                unsafe{device.device.free_memory(self.memory, None)};
+                unsafe{device.device.destroy_buffer(self.buffer, None)};
+                let tuple = VertexBuffer::create_buffer(&device.device, buffer_size_vertices, BufferUsageFlags::TRANSFER_DST | BufferUsageFlags::VERTEX_BUFFER, MemoryPropertyFlags::DEVICE_LOCAL, &device_memory_properties);
+                self.buffer = tuple.0;
+                self.memory = tuple.1;
+            }
+            if self.indices_count != indices.len() as u32{
+                unsafe{device.device.free_memory(self.index_memory, None)};
+                unsafe{device.device.destroy_buffer(self.index_buffer, None)};
+                let index_tuple = VertexBuffer::create_buffer(&device.device, buffer_size_indices, BufferUsageFlags::INDEX_BUFFER | BufferUsageFlags::TRANSFER_DST, MemoryPropertyFlags::DEVICE_LOCAL, &device_memory_properties);
+                self.index_buffer = index_tuple.0;
+                self.index_memory = index_tuple.1;
             }
         }
-        if indices.len() as u32 != self.indices_count{
-            unsafe{device.device.free_memory(self.index_memory, None)};
-            unsafe{device.device.destroy_buffer(self.index_buffer, None)};
-            let new_buffer = VertexBuffer::create_buffer(&device.device, buffer_size, BufferUsageFlags::INDEX_BUFFER | BufferUsageFlags::TRANSFER_DST, MemoryPropertyFlags::DEVICE_LOCAL, &device_memory_properties);
-            self.index_buffer = new_buffer.0;
-            self.index_memory = new_buffer.1;
-            command_pool.record_command_buffers(pipeline, &device.device, render_pass, framebuffers, extent, self.buffer, self.index_buffer, indices.len() as u32, descriptor_sets, pipeline_layout);
-        }
-        VertexBuffer::copy_buffer(&device.device,*queue,command_pool.command_pool,staging_buffer,self.index_buffer,buffer_size);
+        let (staging_buffer , staging_buffer_memory) = VertexBuffer::create_buffer(&device.device, buffer_size_vertices, BufferUsageFlags::TRANSFER_SRC, MemoryPropertyFlags::HOST_COHERENT | MemoryPropertyFlags::HOST_VISIBLE, &device_memory_properties);
+        let buffer_data = unsafe{device.device.map_memory(staging_buffer_memory,0,buffer_size_vertices,MemoryMapFlags::empty()).expect("Failed to Map Memory") as *mut Vertex};
+        unsafe{buffer_data.copy_from_nonoverlapping(vertices.as_ptr(), vertices.len())};
+        unsafe{device.device.unmap_memory(staging_buffer_memory)};
+        VertexBuffer::copy_buffer(&device.device,*queue,command_pool.command_pool,staging_buffer,self.buffer,buffer_size_vertices);
+        unsafe{device.device.destroy_buffer(staging_buffer, None)};
+        unsafe{device.device.free_memory(staging_buffer_memory, None)};
+        let (staging_buffer , staging_buffer_memory) = VertexBuffer::create_buffer(&device.device, buffer_size_indices, BufferUsageFlags::TRANSFER_SRC, MemoryPropertyFlags::HOST_COHERENT | MemoryPropertyFlags::HOST_VISIBLE, &device_memory_properties);
+        let buffer_data = unsafe{device.device.map_memory(staging_buffer_memory,0,buffer_size_indices,MemoryMapFlags::empty()).expect("Failed to Map Memory") as *mut u32};
+        unsafe{buffer_data.copy_from_nonoverlapping(indices.as_ptr(), indices.len())};
+        unsafe{device.device.unmap_memory(staging_buffer_memory)};
+        VertexBuffer::copy_buffer(&device.device,*queue,command_pool.command_pool,staging_buffer,self.index_buffer,buffer_size_indices);
         unsafe{device.device.destroy_buffer(staging_buffer, None)};
         unsafe{device.device.free_memory(staging_buffer_memory, None)};
         self.indices_count = indices.len() as u32;
+        command_pool.reallocate_command_buffers(command_pool.command_buffers.len() as u32, &device.device);
+        command_pool.record_command_buffers(pipeline, &device.device, render_pass, framebuffers, extent, self.buffer, self.index_buffer, indices.len() as u32, descriptor_sets, pipeline_layout);
     }
 }
 pub struct VKDescriptorPool{

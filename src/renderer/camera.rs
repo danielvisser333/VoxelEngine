@@ -14,7 +14,7 @@ impl Camera{
         let proj_matrix = cgmath::perspective(cgmath::Rad(0.5) , width / height, 0.1, 10.0);
         return Self{model_matrix,view_matrix,proj_matrix};
     }
-    pub fn move_camera(&mut self , delta_x : f32 , delta_y : f32 , delty_z : f32){
+    pub fn move_camera(&mut self , delta_x : f32 , delta_y : f32 , delty_z : f32 , rot_x : f32 , rot_y : f32 , rot_z : f32){
         
     }
 }
