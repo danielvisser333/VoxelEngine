@@ -1,2 +1,2 @@
-pub mod vulkan;
-pub mod camera;
+pub mod game_functions;
+pub mod vertex;
